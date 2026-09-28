@@ -42,3 +42,7 @@ TestResults/
 
 # Publish output
 publish/
+
+# Python
+__pycache__/
+*.pyc
