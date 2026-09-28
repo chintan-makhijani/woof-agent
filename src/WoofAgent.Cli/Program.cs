@@ -8,6 +8,7 @@ using WoofAgent.Core.Agents;
 using WoofAgent.Core.Filters;
 using WoofAgent.Core.Plugins;
 using WoofAgent.Providers;
+using WoofAgent.Shared.Auth;
 using WoofAgent.Shared.Configuration;
 
 // Parse command line args
@@ -44,7 +45,8 @@ if (useMcp)
 
     string endpoint;
     string name;
-    string? accessToken;
+    string? accessToken = null;
+    FileTokenStore? swiggyTokenStore = null;
 
     if (useZomato)
     {
@@ -54,7 +56,7 @@ if (useMcp)
     }
     else
     {
-        accessToken = mcpSettings.Swiggy.AccessToken;
+        swiggyTokenStore = new FileTokenStore(mcpSettings.Swiggy.TokenFile, mcpSettings.Swiggy.AccessToken);
         if (useSwiggyInstamart)
         {
             endpoint = mcpSettings.Swiggy.InstamartEndpoint;
@@ -79,15 +81,27 @@ if (useMcp)
         Name = name
     };
 
-    if (!string.IsNullOrEmpty(accessToken))
+    SseClientTransport transport;
+    if (swiggyTokenStore is not null)
     {
-        transportOptions.AdditionalHeaders = new Dictionary<string, string>
-        {
-            ["Authorization"] = $"Bearer {accessToken}"
-        };
+        // Swiggy tokens last 5 days with no refresh token; read the token per request
+        // so a re-login (scripts/swiggy_token.py login) applies without a restart
+        ReportTokenStatus(name, swiggyTokenStore);
+        var httpClient = new HttpClient(new BearerTokenHandler(swiggyTokenStore, name));
+        transport = new SseClientTransport(transportOptions, httpClient, ownsHttpClient: true);
     }
+    else
+    {
+        if (!string.IsNullOrEmpty(accessToken))
+        {
+            transportOptions.AdditionalHeaders = new Dictionary<string, string>
+            {
+                ["Authorization"] = $"Bearer {accessToken}"
+            };
+        }
 
-    var transport = new SseClientTransport(transportOptions);
+        transport = new SseClientTransport(transportOptions);
+    }
 
     // Connect to MCP server and discover tools
     Console.WriteLine($"Connecting to {name} MCP server at {endpoint}...");
@@ -220,6 +234,25 @@ finally
 }
 
 Console.WriteLine("Goodbye!");
+
+static void ReportTokenStatus(string name, FileTokenStore store)
+{
+    var token = store.GetCurrent();
+    if (token is null)
+    {
+        Console.WriteLine($"[{name}] No token found in {store.FilePath} or user-secrets. Run: python3 scripts/swiggy_token.py login");
+        return;
+    }
+
+    if (token.Remaining is not { } remaining)
+        Console.WriteLine($"[{name}] Token loaded (expiry unknown).");
+    else if (token.IsExpired)
+        Console.WriteLine($"[{name}] WARNING: token expired at {token.ExpiresAt:u}. Run: python3 scripts/swiggy_token.py login");
+    else if (remaining < TimeSpan.FromHours(24))
+        Console.WriteLine($"[{name}] WARNING: token expires in {remaining.TotalHours:F1}h ({token.ExpiresAt:u}). Re-login soon.");
+    else
+        Console.WriteLine($"[{name}] Token valid for {remaining.TotalDays:F1} more days ({token.ExpiresAt:u}).");
+}
 
 static string GetModelId(LlmSettings settings) =>
     settings.DefaultProvider.ToLowerInvariant() switch

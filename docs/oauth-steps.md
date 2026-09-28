@@ -71,9 +71,11 @@ dotnet user-secrets set "McpServers:Zomato:AccessToken" "TOKEN_VALUE"
 
 ## Swiggy Token Refresh
 
-Swiggy requires the client to be named `"Claude"` and does **not** allow Postman callback URLs. Use a localhost redirect with a local callback server.
+Swiggy access tokens last **5 days** and Swiggy issues **no refresh token**. Sign-in needs phone + OTP on Swiggy's own page, and Swiggy's docs say the OTP endpoints are internal and not for third-party clients. So the OTP step can't be fully automated. `scripts/swiggy_token.py` makes it a one-minute step and automates everything else.
 
-### 1. Register a client
+### One-time: register the client
+
+Swiggy requires the client to be named `"Claude"` and does **not** allow Postman callback URLs:
 
 ```bash
 curl -s -X POST https://mcp.swiggy.com/auth/register \
@@ -89,81 +91,40 @@ curl -s -X POST https://mcp.swiggy.com/auth/register \
 
 The `client_id` is always `swiggy-mcp`.
 
-### 2. Generate PKCE and start local callback server
-
-Save this as a one-shot script or run inline. It generates PKCE, prints the auth URL, starts a local server on port 8765, and automatically exchanges the code for a token when the callback arrives.
+### Get a new token (every time it expires)
 
 ```bash
-python3 << 'PYEOF'
-import secrets, hashlib, base64, urllib.parse, json
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import urllib.request, threading
-
-# Generate PKCE
-verifier = secrets.token_urlsafe(32)
-challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
-state = secrets.token_urlsafe(16)
-
-params = urllib.parse.urlencode({
-    'response_type': 'code',
-    'client_id': 'swiggy-mcp',
-    'redirect_uri': 'http://localhost:8765/callback',
-    'code_challenge': challenge,
-    'code_challenge_method': 'S256',
-    'state': state,
-})
-
-print(f'\nOpen this URL in your browser:\n')
-print(f'https://mcp.swiggy.com/auth/authorize?{params}\n')
-print('Waiting for callback on http://localhost:8765 ...\n')
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        from urllib.parse import urlparse, parse_qs
-        parsed = urlparse(self.path)
-        p = parse_qs(parsed.query)
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html')
-        self.end_headers()
-        if 'code' in p:
-            code = p['code'][0]
-            data = urllib.parse.urlencode({
-                'grant_type': 'authorization_code',
-                'code': code,
-                'code_verifier': verifier,
-                'client_id': 'swiggy-mcp',
-                'redirect_uri': 'http://localhost:8765/callback',
-            }).encode()
-            req = urllib.request.Request('https://mcp.swiggy.com/auth/token', data=data,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    result = json.loads(resp.read().decode())
-                    token = result['access_token']
-                    self.wfile.write(b'<h1>Success! Token obtained. You can close this tab.</h1>')
-                    print(f'\nACCESS TOKEN:\n{token}\n')
-                    print(f'Run this to store it:')
-                    print(f'cd src/WoofAgent.Cli && dotnet user-secrets set "McpServers:Swiggy:AccessToken" "{token}"')
-            except Exception as e:
-                self.wfile.write(f'<h1>Error: {e}</h1>'.encode())
-                print(f'Error: {e}')
-        threading.Thread(target=self.server.shutdown).start()
-    def log_message(self, *a): pass
-
-HTTPServer(('localhost', 8765), Handler).serve_forever()
-PYEOF
+python3 scripts/swiggy_token.py login
 ```
 
-### 3. Authorize in browser
+The script opens the browser. Sign in with the phone number and OTP. The script catches the callback on `localhost:8765`, exchanges the code (PKCE), and writes `~/.woof-agent/swiggy-token.json` (mode 600).
 
-Open the URL printed by the script, log in to Swiggy, and authorize. The script will automatically exchange the code and print the token.
+- **No user-secrets step and no restart.** WoofAgent reads the token file on every request (`BearerTokenHandler`), so a running session uses the new token on its next MCP call.
+- The token file takes precedence over `McpServers:Swiggy:AccessToken`. The user-secret is still used as a fallback when the file is missing.
+- Override the path with `McpServers:Swiggy:TokenFile` in `appsettings.json` and `WOOF_SWIGGY_TOKEN_FILE` for the script.
+- Headless machine: run it with `--no-browser`, then open the printed URL in a browser **on the same machine** (the redirect goes to `localhost`).
 
-### 4. Store the token
+### Check expiry and get a push alert
 
 ```bash
-cd src/WoofAgent.Cli
-dotnet user-secrets set "McpServers:Swiggy:AccessToken" "TOKEN_VALUE"
+python3 scripts/swiggy_token.py status                  # exit 0 OK, 1 expiring soon, 2 expired/missing
+python3 scripts/swiggy_token.py status --warn-hours 30 --notify
 ```
+
+With `--notify`, an alert is pushed through [ntfy](https://ntfy.sh). Install the ntfy app on your phone and subscribe to a hard-to-guess topic. Then set `WOOF_NTFY_TOPIC` to that topic (and `WOOF_NTFY_SERVER` if you self-host ntfy).
+
+Example crontab for the demo machine (checks every 3 hours):
+
+```cron
+0 */3 * * * WOOF_NTFY_TOPIC=woof-demo-<random> python3 /path/to/woof-agent/scripts/swiggy_token.py status --warn-hours 30 --notify
+```
+
+### Running a multi-day demo (e.g. a tech fair)
+
+1. Use a dedicated demo Swiggy account, with its phone held by whoever staffs the booth.
+2. Run `swiggy_token.py login` **each morning before doors open**. Every login returns a fresh 5-day token, so it can never expire during the day.
+3. Keep the cron alert above as a safety net in case a morning login is missed.
+4. For a long-term fix, apply for partner access through the [Swiggy Builders Club](https://mcp.swiggy.com/builders/) and ask whether refresh tokens or longer-lived tokens are available.
 
 ## Verify tokens are working
 

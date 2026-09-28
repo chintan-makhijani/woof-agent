@@ -45,6 +45,9 @@ WoofAgent.sln
 │   │       └── FridgePlugin.cs     # Mock smart fridge functions
 │   ├── WoofAgent.Providers/    # SK connector extensions (OpenAI, Gemini, OpenRouter)
 │   └── WoofAgent.Shared/       # DTOs, configuration models, utilities
+│       └── Auth/                   # FileTokenStore + BearerTokenHandler (hot-reloaded MCP tokens)
+├── scripts/
+│   └── swiggy_token.py         # Swiggy OAuth login + expiry check/alerts
 ```
 
 **Project References:**
@@ -100,6 +103,8 @@ Both Zomato and Swiggy use OAuth 2.0 with PKCE. Register a client, then do the a
 4. Copy the `code` from the callback URL
 5. Exchange for token: `curl -X POST https://<server>/token -d 'grant_type=authorization_code&code=...&code_verifier=...'`
 6. Store with `dotnet user-secrets` command above
+
+**Swiggy token automation:** Swiggy tokens expire every 5 days, with no refresh token. Run `python3 scripts/swiggy_token.py login`, which writes `~/.woof-agent/swiggy-token.json`. The app re-reads that file on every request, so no restart is needed. `swiggy_token.py status --notify` sends an expiry alert. See [docs/oauth-steps.md](docs/oauth-steps.md).
 
 OAuth endpoints:
 - **Zomato**: auth `https://mcp-server.zomato.com/authorize`, token `https://mcp-server.zomato.com/token`, register `https://mcp-server.zomato.com/register`
